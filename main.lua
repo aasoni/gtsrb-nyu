@@ -3,11 +3,11 @@ require 'optim'
 require 'os'
 require 'optim'
 require 'xlua'
--- require 'cunn'
--- require 'cudnn' -- faster convolutions
+require 'cunn'
+require 'cudnn' -- faster convolutions
 
 --[[
---  Hint:  Plot as much as you can.  
+--  Hint:  Plot as much as you can.
 --  Look into torch wiki for packages that can help you plot.
 --]]
 
@@ -18,10 +18,11 @@ local opt = optParser.parse(arg)
 
 local WIDTH, HEIGHT = 32, 32
 local DATA_PATH = (opt.data ~= '' and opt.data or './data/')
+local replication = 5
 
 torch.setdefaulttensortype('torch.DoubleTensor')
 
--- torch.setnumthreads(1)
+torch.setnumthreads(opt.nThreads)
 torch.manualSeed(opt.manualSeed)
 -- cutorch.manualSeedAll(opt.manualSeed)
 
@@ -29,33 +30,42 @@ function resize(img)
     return image.scale(img, WIDTH,HEIGHT)
 end
 
+function jitter(img)
+    return img
+end
+
 --[[
 -- Hint:  Should we add some more transforms? shifting, scaling?
--- Should all images be of size 32x32?  Are we losing 
+-- Should all images be of size 32x32?  Are we losing
 -- information by resizing bigger images to a smaller size?
 --]]
-function transformInput(inp)
+function transformInput(inp, addJitter)
     f = tnt.transform.compose{
-        [1] = resize
+        [1] = resize,
+        --[2] = resize,
+        --[3] = -- shuffle
+        --[3] = function(img) return image.rgb2yuv(img) end -- rgb to yuv conversion
     }
     return f(inp)
 end
 
 function getTrainSample(dataset, idx)
-    r = dataset[idx]
+    len = dataset:size(1)
+    r = dataset[idx % len + 1]
     classId, track, file = r[9], r[1], r[2]
     file = string.format("%05d/%05d_%05d.ppm", classId, track, file)
-    return transformInput(image.load(DATA_PATH .. '/train_images/'..file))
+    return transformInput(image.load(DATA_PATH .. '/train_images/'..file), idx > len)
 end
 
 function getTrainLabel(dataset, idx)
-    return torch.LongTensor{dataset[idx][9] + 1}
+    len = dataset:size(1)
+    return torch.LongTensor{dataset[idx % len + 1][9] + 1}
 end
 
 function getTestSample(dataset, idx)
     r = dataset[idx]
     file = DATA_PATH .. "/test_images/" .. string.format("%05d.ppm", r[1])
-    return transformInput(image.load(file))
+    return transformInput(image.load(file), false)
 end
 
 function getIterator(dataset)
@@ -77,14 +87,15 @@ trainDataset = tnt.SplitDataset{
     partitions = {train=0.9, val=0.1},
     initialpartition = 'train',
     --[[
-    --  Hint:  Use a resampling strategy that keeps the 
-    --  class distribution even during initial training epochs 
-    --  and then slowly converges to the actual distribution 
+    --  Hint:  Use a resampling strategy that keeps the
+    --  class distribution even during initial training epochs
+    --  and then slowly converges to the actual distribution
     --  in later stages of training.
     --]]
     dataset = tnt.ShuffleDataset{
         dataset = tnt.ListDataset{
-            list = torch.range(1, trainData:size(1)):long(),
+            -- note the 
+            list = torch.range(1, trainData:size(1)*replication):long(),
             load = function(idx)
                 return {
                     input =  getTrainSample(trainData, idx),
@@ -132,7 +143,7 @@ engine.hooks.onStart = function(state)
 end
 
 --[[
--- Hint:  Use onSample function to convert to 
+-- Hint:  Use onSample function to convert to
 --        cuda tensor for using GPU
 --]]
 -- engine.hooks.onSample = function(state)
