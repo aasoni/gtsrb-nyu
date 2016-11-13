@@ -4,7 +4,7 @@ require 'os'
 require 'optim'
 require 'xlua'
 require 'cunn'
-require 'cudnn' -- faster convolutions
+-- require 'cudnn' -- faster convolutions
 
 --[[
 --  Hint:  Plot as much as you can.
@@ -94,7 +94,6 @@ trainDataset = tnt.SplitDataset{
     --]]
     dataset = tnt.ShuffleDataset{
         dataset = tnt.ListDataset{
-            -- note the 
             list = torch.range(1, trainData:size(1)*replication):long(),
             load = function(idx)
                 return {
@@ -121,13 +120,12 @@ local model = require("models/".. opt.model)
 model:cuda()
 local engine = tnt.OptimEngine()
 local meter = tnt.AverageValueMeter()
-local criterion = nn.CrossEntropyCriterion()
+local criterion = nn.CrossEntropyCriterion():cuda()
 local clerr = tnt.ClassErrorMeter{topk = {1}}
 local timer = tnt.TimeMeter()
 local batch = 1
 
 -- print(model)
-
 engine.hooks.onStart = function(state)
     meter:reset()
     clerr:reset()
@@ -140,12 +138,10 @@ engine.hooks.onStart = function(state)
     end
 end
 
---[[
--- Hint:  Use onSample function to convert to
---        cuda tensor for using GPU
---]]
--- engine.hooks.onSample = function(state)
--- end
+engine.hooks.onSample = function(state)
+    state.sample.input:cuda()
+    state.sample.target:cuda()
+end
 
 engine.hooks.onForwardCriterion = function(state)
     meter:add(state.criterion.output)
@@ -154,7 +150,7 @@ engine.hooks.onForwardCriterion = function(state)
         print(string.format("%s Batch: %d/%d; avg. loss: %2.4f; avg. error: %2.4f",
                 mode, batch, state.iterator.dataset:size(), meter:value(), clerr:value{k = 1}))
     else
-        xlua.progress(batch, state.iterator.dataset:size())
+        -- xlua.progress(batch, state.iterator.dataset:size())
     end
     batch = batch + 1 -- batch increment has to happen here to work for train, val and test.
     timer:incUnit()
@@ -218,5 +214,8 @@ engine:test{
     network = model,
     iterator = getIterator(testDataset)
 }
+
+--  Serialize and write model to file
+torch.save('ala458_gtsrb', model:clearState())
 
 print("The End!")
