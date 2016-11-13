@@ -117,10 +117,8 @@ testDataset = tnt.ListDataset{
 }
 
 
---[[
--- Hint:  Use :cuda to convert your model to use GPUs
---]]
 local model = require("models/".. opt.model)
+model:cuda()
 local engine = tnt.OptimEngine()
 local meter = tnt.AverageValueMeter()
 local criterion = nn.CrossEntropyCriterion()
