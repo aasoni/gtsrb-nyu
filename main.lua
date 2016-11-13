@@ -138,9 +138,12 @@ engine.hooks.onStart = function(state)
     end
 end
 
+local igpu, tgpu = torch.CudaTensor(), torch.CudaTensor()
 engine.hooks.onSample = function(state)
-    state.sample.input:cuda()
-    state.sample.target:cuda()
+    igpu:resize(state.sample.input:size() ):copy(state.sample.input)
+    tgpu:resize(state.sample.target:size()):copy(state.sample.target)
+    state.sample.input  = igpu
+    state.sample.target = tgpu
 end
 
 engine.hooks.onForwardCriterion = function(state)
