@@ -3,7 +3,7 @@ require 'optim'
 require 'os'
 require 'optim'
 require 'xlua'
-require 'cunn'
+ -- require 'cunn'
 -- require 'cudnn' -- faster convolutions
 
 --[[
@@ -18,7 +18,8 @@ local opt = optParser.parse(arg)
 
 local WIDTH, HEIGHT = 32, 32
 local DATA_PATH = (opt.data ~= '' and opt.data or './data/')
-local replication = 5
+local replication = 1
+local testMode = false
 
 torch.setdefaulttensortype('torch.DoubleTensor')
 
@@ -26,11 +27,19 @@ torch.setnumthreads(opt.nThreads)
 torch.manualSeed(opt.manualSeed)
 -- cutorch.manualSeedAll(opt.manualSeed)
 
+local x1, y1, x2, y2
+function crop(img)
+    return image.crop(img, x1, y1, x2, y2)
+end
+
 function resize(img)
     return image.scale(img, WIDTH,HEIGHT)
 end
 
+local seed
 function jitter(img)
+    torch.manualSeed(seed)
+    img = image.scale(img, string.format("*%.2f", torch.uniform(0.9,1.2)))
     return img
 end
 
@@ -39,33 +48,63 @@ end
 -- Should all images be of size 32x32?  Are we losing
 -- information by resizing bigger images to a smaller size?
 --]]
-function transformInput(inp, addJitter)
+function transformInput(inp)
     f = tnt.transform.compose{
-        [1] = resize,
-        --[2] = resize,
-        --[3] = -- shuffle
-        --[3] = function(img) return image.rgb2yuv(img) end -- rgb to yuv conversion
+        [1] = crop,
+        [2] = resize
     }
     return f(inp)
 end
 
+function sampleUniform(epoch)
+    local y = torch.uniform(0,1)
+    local e = opt.nEpochs - 5
+    return y < (-1.0/e)*epoch + 1
+end
+
+function findSampleWithLabel(dataset, idx, label)
+    local i = idx
+    local len = dataset:size(1)
+    while true do
+        ret = dataset[(i%len)+1]
+        if ret[9] == label then
+            return ret
+        end
+        i = i + 1
+    end
+end
+
+local epoch = 1
+local label = 0
 function getTrainSample(dataset, idx)
-    len = dataset:size(1)
-    r = dataset[idx % len + 1]
+    sample = dataset[idx]
+    local r
+    if sampleUniform(epoch) then
+        r = findSampleWithLabel(dataset, idx, label)
+        label = (label + 1) % 43
+    else
+        r = dataset[idx]
+    end
     classId, track, file = r[9], r[1], r[2]
+    x1, y1, x2, y2 = r[5], r[6], r[7], r[8]
     file = string.format("%05d/%05d_%05d.ppm", classId, track, file)
-    return transformInput(image.load(DATA_PATH .. '/train_images/'..file), idx > len)
+    seed = idx
+    return transformInput(image.load(DATA_PATH .. '/train_images/'..file))
 end
 
 function getTrainLabel(dataset, idx)
-    len = dataset:size(1)
-    return torch.LongTensor{dataset[idx % len + 1][9] + 1}
+    return torch.LongTensor{dataset[idx][9] + 1}
 end
 
 function getTestSample(dataset, idx)
     r = dataset[idx]
+    x1, y1, x2, y2 = r[4], r[5], r[6], r[7]
     file = DATA_PATH .. "/test_images/" .. string.format("%05d.ppm", r[1])
     return transformInput(image.load(file), false)
+end
+
+function getTestLabel(dataset, idx)
+    return torch.LongTensor{dataset[idx][8]+1}
 end
 
 function getIterator(dataset)
@@ -94,15 +133,17 @@ trainDataset = tnt.SplitDataset{
     --]]
     dataset = tnt.ShuffleDataset{
         dataset = tnt.ListDataset{
-            list = torch.range(1, trainData:size(1)*replication):long(),
+            list = torch.range(1, trainData:size(1)):long(),
             load = function(idx)
                 return {
                     input =  getTrainSample(trainData, idx),
                     target = getTrainLabel(trainData, idx)
                 }
             end
-        }
-    }
+        },
+        replacement = true
+    },
+
 }
 
 testDataset = tnt.ListDataset{
@@ -110,17 +151,17 @@ testDataset = tnt.ListDataset{
     load = function(idx)
         return {
             input = getTestSample(testData, idx),
-            sampleId = torch.LongTensor{testData[idx][1]}
+            sampleId = torch.LongTensor{testData[idx][1]},
+            target = getTestLabel(testData, idx)
         }
     end
 }
 
-
 local model = require("models/".. opt.model)
-model:cuda()
+-- model:cuda()
 local engine = tnt.OptimEngine()
 local meter = tnt.AverageValueMeter()
-local criterion = nn.CrossEntropyCriterion():cuda()
+local criterion = nn.CrossEntropyCriterion()
 local clerr = tnt.ClassErrorMeter{topk = {1}}
 local timer = tnt.TimeMeter()
 local batch = 1
@@ -133,27 +174,29 @@ engine.hooks.onStart = function(state)
     batch = 1
     if state.training then
         mode = 'Train'
+    elseif testMode then
+        mode = 'Test'
     else
         mode = 'Val'
     end
 end
 
-local igpu, tgpu = torch.CudaTensor(), torch.CudaTensor()
-engine.hooks.onSample = function(state)
-    igpu:resize(state.sample.input:size() ):copy(state.sample.input)
-    tgpu:resize(state.sample.target:size()):copy(state.sample.target)
-    state.sample.input  = igpu
-    state.sample.target = tgpu
-end
+--local igpu, tgpu = torch.CudaTensor(), torch.CudaTensor()
+--engine.hooks.onSample = function(state)
+--    igpu:resize(state.sample.input:size() ):copy(state.sample.input)
+--    tgpu:resize(state.sample.target:size()):copy(state.sample.target)
+--    state.sample.input  = igpu
+--    state.sample.target = tgpu
+-- end
 
 engine.hooks.onForwardCriterion = function(state)
     meter:add(state.criterion.output)
     clerr:add(state.network.output, state.sample.target)
-    if opt.verbose == true then
+    if opt.verbose == 'true' then
         print(string.format("%s Batch: %d/%d; avg. loss: %2.4f; avg. error: %2.4f",
-                mode, batch, state.iterator.dataset:size(), meter:value(), clerr:value{k = 1}))
+              mode, batch, state.iterator.dataset:size(), meter:value(), clerr:value{k = 1}))
     else
-        -- xlua.progress(batch, state.iterator.dataset:size())
+        xlua.progress(batch, state.iterator.dataset:size())
     end
     batch = batch + 1 -- batch increment has to happen here to work for train, val and test.
     timer:incUnit()
@@ -161,10 +204,9 @@ end
 
 engine.hooks.onEnd = function(state)
     print(string.format("%s: avg. loss: %2.4f; avg. error: %2.4f, time: %2.4f",
-    mode, meter:value(), clerr:value{k = 1}, timer:value()))
+                        mode, meter:value(), clerr:value{k = 1}, timer:value()))
 end
 
-local epoch = 1
 
 while epoch <= opt.nEpochs do
     trainDataset:select('train')
@@ -186,6 +228,15 @@ while epoch <= opt.nEpochs do
         criterion = criterion,
         iterator = getIterator(trainDataset)
     }
+
+    testMode = true
+    engine:test{
+        network = model,
+        criterion = criterion,
+        iterator = getIterator(testDataset)
+    }
+    testMode = false
+
     print('Done with Epoch '..tostring(epoch))
     epoch = epoch + 1
 end
