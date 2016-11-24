@@ -3,13 +3,7 @@ require 'optim'
 require 'os'
 require 'optim'
 require 'xlua'
- -- require 'cunn'
--- require 'cudnn' -- faster convolutions
-
---[[
---  Hint:  Plot as much as you can.
---  Look into torch wiki for packages that can help you plot.
---]]
+require 'jitter' -- small library to add jitter to images
 
 local tnt = require 'torchnet'
 local image = require 'image'
@@ -18,14 +12,13 @@ local opt = optParser.parse(arg)
 
 local WIDTH, HEIGHT = 32, 32
 local DATA_PATH = (opt.data ~= '' and opt.data or './data/')
-local replication = 1
+local percentJitter = 0.8
 local testMode = false
 
 torch.setdefaulttensortype('torch.DoubleTensor')
 
 torch.setnumthreads(opt.nThreads)
 torch.manualSeed(opt.manualSeed)
--- cutorch.manualSeedAll(opt.manualSeed)
 
 local x1, y1, x2, y2
 function crop(img)
@@ -36,33 +29,27 @@ function resize(img)
     return image.scale(img, WIDTH,HEIGHT)
 end
 
-local seed
-function jitter(img)
-    torch.manualSeed(seed)
-    img = image.scale(img, string.format("*%.2f", torch.uniform(0.9,1.2)))
-    return img
-end
-
---[[
--- Hint:  Should we add some more transforms? shifting, scaling?
--- Should all images be of size 32x32?  Are we losing
--- information by resizing bigger images to a smaller size?
---]]
-function transformInput(inp)
+function transformInput(inp, addJitter)
+    addJitter = addJitter and torch.uniform(0,1) > percentJitter
     f = tnt.transform.compose{
         [1] = crop,
-        [2] = resize
+        [2] = resize,
+        [3] = addJitter and jitter or function (img) return img end
     }
     return f(inp)
 end
 
 function sampleUniform(epoch)
+    -- Determine if we should sample uniformly
+    -- across class ids for this current sample
     local y = torch.uniform(0,1)
     local e = opt.nEpochs - 5
     return y < (-1.0/e)*epoch + 1
 end
 
 function findSampleWithLabel(dataset, idx, label)
+    -- Search forward from the given index 'idx' and
+    -- return the first sample with the provided label
     local i = idx
     local len = dataset:size(1)
     while true do
@@ -77,7 +64,9 @@ end
 local epoch = 1
 local label = 0
 function getTrainSample(dataset, idx)
-    sample = dataset[idx]
+    -- get train sample at index 'idex' from dataset.
+    -- NOTE: special sampling occurs when sampleUniform
+    -- returns true.
     local r
     if sampleUniform(epoch) then
         r = findSampleWithLabel(dataset, idx, label)
@@ -89,7 +78,7 @@ function getTrainSample(dataset, idx)
     x1, y1, x2, y2 = r[5], r[6], r[7], r[8]
     file = string.format("%05d/%05d_%05d.ppm", classId, track, file)
     seed = idx
-    return transformInput(image.load(DATA_PATH .. '/train_images/'..file))
+    return transformInput(image.load(DATA_PATH .. '/train_images/'..file), true)
 end
 
 function getTrainLabel(dataset, idx)
@@ -108,9 +97,6 @@ function getTestLabel(dataset, idx)
 end
 
 function getIterator(dataset)
-    --[[
-    -- Hint:  Use ParallelIterator for using multiple CPU cores
-    --]]
     return tnt.DatasetIterator{
         dataset = tnt.BatchDataset{
             batchsize = opt.batchsize,
@@ -125,12 +111,7 @@ local testData = torch.load(DATA_PATH..'test.t7')
 trainDataset = tnt.SplitDataset{
     partitions = {train=0.9, val=0.1},
     initialpartition = 'train',
-    --[[
-    --  Hint:  Use a resampling strategy that keeps the
-    --  class distribution even during initial training epochs
-    --  and then slowly converges to the actual distribution
-    --  in later stages of training.
-    --]]
+
     dataset = tnt.ShuffleDataset{
         dataset = tnt.ListDataset{
             list = torch.range(1, trainData:size(1)):long(),
@@ -143,7 +124,6 @@ trainDataset = tnt.SplitDataset{
         },
         replacement = true
     },
-
 }
 
 testDataset = tnt.ListDataset{
@@ -164,8 +144,6 @@ local meter = tnt.AverageValueMeter()
 local criterion = nn.CrossEntropyCriterion()
 local clerr = tnt.ClassErrorMeter{topk = {1}}
 local timer = tnt.TimeMeter()
-local batch = 1
-
 -- print(model)
 engine.hooks.onStart = function(state)
     meter:reset()
