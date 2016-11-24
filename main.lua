@@ -5,7 +5,6 @@ require 'optim'
 require 'xlua'
 require 'jitter' -- small library to add jitter to images
 
-local tnt = require 'torchnet'
 local image = require 'image'
 local optParser = require 'opts'
 local opt = optParser.parse(arg)

@@ -2,6 +2,8 @@
 -- of different kinds (rotation, shift, brightness) that
 -- can be applied to input images used the 'jitter' function
 
+tnt = require 'torchnet'
+
 function rotate(img)
     mask = torch.DoubleTensor(img:size()):fill(1.0)
     theta = torch.uniform(-0.2, 0.2)
@@ -20,9 +22,12 @@ function shift(img)
 end
 
 function bright(img)
-    val = torch.uniform(-0.1, 2.0)
+    val = torch.uniform(0, 1.0)
+    if val > 0.5 then
+        return img
+    end
     hsv = image.rgb2hsv(img)
-    hsv[3] = hsv[3] + val
+    hsv[3] = hsv[3] + torch.uniform(-0.1,1.5)
     return image.hsv2rgb(hsv)
 end
 
